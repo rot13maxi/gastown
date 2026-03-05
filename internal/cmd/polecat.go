@@ -389,6 +389,20 @@ type PolecatListItem struct {
 	SessionName    string        `json:"session_name,omitempty"`
 }
 
+// effectivePolecatState returns the observable state used by polecat list output.
+// Session liveness is ground truth for working/done transitions. Zombie entries
+// are never auto-rewritten.
+func effectivePolecatState(item PolecatListItem) polecat.State {
+	state := item.State
+	if item.SessionRunning && state == polecat.StateDone {
+		return polecat.StateWorking
+	}
+	if !item.SessionRunning && !item.Zombie && state == polecat.StateWorking {
+		return polecat.StateDone
+	}
+	return state
+}
+
 // getPolecatManager creates a polecat manager for the given rig.
 func getPolecatManager(rigName string) (*polecat.Manager, *rig.Rig, error) {
 	_, r, err := getRig(rigName)
@@ -477,6 +491,10 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 	}
 
 	// Output
+	for i := range allPolecats {
+		allPolecats[i].State = effectivePolecatState(allPolecats[i])
+	}
+
 	if polecatListJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -496,20 +514,9 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 			sessionStatus = style.Success.Render("●")
 		}
 
-		// Display actual state, reconciled with tmux session liveness.
-		// Per gt-zecmc design: tmux is ground truth for observable states.
-		// If session is running but beads says done, the polecat is still alive.
-		// If session is dead but beads says working, the polecat is actually done.
-		displayState := p.State
-		if p.SessionRunning && displayState == polecat.StateDone {
-			displayState = polecat.StateWorking
-		} else if !p.SessionRunning && !p.Zombie && displayState == polecat.StateWorking {
-			displayState = polecat.StateDone
-		}
-
 		// State color
-		stateStr := string(displayState)
-		switch displayState {
+		stateStr := string(p.State)
+		switch p.State {
 		case polecat.StateWorking:
 			stateStr = style.Info.Render(stateStr)
 		case polecat.StateStuck:
