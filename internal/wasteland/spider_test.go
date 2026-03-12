@@ -355,10 +355,10 @@ func TestParseColumnHelpers(t *testing.T) {
 		t.Errorf("parseFloatColumn bad parse should return fallback, got %f", v)
 	}
 
-	if v := parseIntColumn(row, 1, 0); v != 42 {
+	if v := parseIntColumn(row, 1); v != 42 {
 		t.Errorf("parseIntColumn = %d, want 42", v)
 	}
-	if v := parseIntColumn(row, 99, -1); v != -1 {
-		t.Errorf("parseIntColumn out-of-range should return fallback, got %d", v)
+	if v := parseIntColumn(row, 99); v != 0 {
+		t.Errorf("parseIntColumn out-of-range should return 0, got %d", v)
 	}
 }
