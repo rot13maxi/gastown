@@ -1144,7 +1144,22 @@ notifyWitness:
 			}
 		}
 
-		fmt.Printf("%s Polecat transitioned to IDLE — ready for new work\n", style.Bold.Render("✓"))
+		// Check if self-terminate is enabled (opt-in via config).
+		// When enabled, polecats kill their session after work completion
+		// instead of transitioning to IDLE. This gives fresh context windows
+		// per task, reduces token waste, and eliminates stale state bugs.
+		daemonCfg := config.LoadOperationalConfig(townRoot).GetDaemonConfig()
+		if daemonCfg.PolecatSelfTerminate != nil && *daemonCfg.PolecatSelfTerminate {
+			fmt.Printf("%s Work complete — terminating session (polecat_self_terminate=true)\n", style.Bold.Render("✓"))
+			sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
+			go func() {
+				time.Sleep(3 * time.Second)
+				t := tmux.NewTmux()
+				_ = t.KillSessionWithProcesses(sessionName)
+			}()
+		} else {
+			fmt.Printf("%s Polecat transitioned to IDLE — ready for new work\n", style.Bold.Render("✓"))
+		}
 	}
 
 	fmt.Println()
