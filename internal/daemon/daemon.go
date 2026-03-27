@@ -1198,6 +1198,16 @@ func (d *Daemon) ensureWitnessRunning(rigName string) {
 	// Check rig operational state before auto-starting
 	if operational, reason := d.isRigOperational(rigName); !operational {
 		d.logger.Printf("Skipping witness auto-start for %s: %s", rigName, reason)
+		// Kill leftover witness session if rig is not operational (docked/parked).
+		// Without this, sessions started before the rig was docked survive until
+		// the next explicit 'gt rig dock' command. (hq-snx61)
+		name := session.WitnessSessionName(session.PrefixFor(rigName))
+		if exists, _ := d.tmux.HasSession(name); exists {
+			d.logger.Printf("Killing leftover witness %s (rig %s)", name, reason)
+			if err := d.tmux.KillSessionWithProcesses(name); err != nil {
+				d.logger.Printf("Error killing leftover witness %s: %v", name, err)
+			}
+		}
 		return
 	}
 
@@ -1247,6 +1257,16 @@ func (d *Daemon) ensureRefineryRunning(rigName string) {
 	// Check rig operational state before auto-starting
 	if operational, reason := d.isRigOperational(rigName); !operational {
 		d.logger.Printf("Skipping refinery auto-start for %s: %s", rigName, reason)
+		// Kill leftover refinery session if rig is not operational (docked/parked).
+		// Without this, sessions started before the rig was docked survive until
+		// the next explicit 'gt rig dock' command. (hq-snx61)
+		name := session.RefinerySessionName(session.PrefixFor(rigName))
+		if exists, _ := d.tmux.HasSession(name); exists {
+			d.logger.Printf("Killing leftover refinery %s (rig %s)", name, reason)
+			if err := d.tmux.KillSessionWithProcesses(name); err != nil {
+				d.logger.Printf("Error killing leftover refinery %s: %v", name, err)
+			}
+		}
 		return
 	}
 
