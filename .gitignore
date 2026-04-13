@@ -50,6 +50,7 @@ state.json
 .beads/daemon-*.log.gz
 .beads/.sync.lock
 .beads/sync_base.jsonl
+.beads/backup/
 .beads-wisp/
 
 # Clone-specific CLAUDE.md (regenerated locally per clone)
