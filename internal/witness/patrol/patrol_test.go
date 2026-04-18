@@ -444,3 +444,27 @@ func TestStateFilePermission(t *testing.T) {
 		t.Errorf("state file should have 0600 permissions, got %v", info.Mode())
 	}
 }
+
+func TestPatrolConfigShadowMode(t *testing.T) {
+	cfg := PatrolConfig{
+		Rig:     "gastown",
+		WorkDir: "/tmp",
+		Shadow:  true,
+	}
+
+	if !cfg.Shadow {
+		t.Errorf("Shadow mode should be enabled")
+	}
+}
+
+func TestPatrolCycleResultShadowMode(t *testing.T) {
+	result := &PatrolCycleResult{
+		Timestamp:  time.Now(),
+		Rig:        "gastown",
+		ShadowMode: true,
+	}
+
+	if !result.ShadowMode {
+		t.Errorf("ShadowMode should be true in result")
+	}
+}

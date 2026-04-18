@@ -38,6 +38,11 @@ const (
 	DefaultIdleEffortThreshold = 3
 )
 
+// logf logs a message to stderr. In shadow mode, all actions are prefixed with SHADOW:.
+func logf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+}
+
 // PatrolConfig holds configuration for the patrol loop.
 type PatrolConfig struct {
 	Rig                 string
@@ -50,6 +55,7 @@ type PatrolConfig struct {
 	Once                bool // Run one cycle and exit
 	JSON                bool // JSON output for --once mode
 	Verbose             bool
+	Shadow              bool // Shadow mode: log actions without taking them
 	Escalator           *Escalator
 }
 
@@ -75,6 +81,7 @@ type PatrolCycleResult struct {
 	Effort        string         `json:"effort"` // "full" or "abbreviated"
 	CycleDuration time.Duration  `json:"cycle_duration"`
 	Error         string         `json:"error,omitempty"`
+	ShadowMode    bool           `json:"shadow_mode"`
 }
 
 // StateFileName is the filename for the patrol state file.
@@ -152,8 +159,9 @@ func RunPatrolLoop(ctx context.Context, cfg PatrolConfig) error {
 func runOneCycle(ctx context.Context, cfg PatrolConfig, state *PatrolState) (*PatrolCycleResult, error) {
 	cycleStarted := time.Now()
 	result := &PatrolCycleResult{
-		Timestamp: cycleStarted,
-		Rig:       cfg.Rig,
+		Timestamp:  cycleStarted,
+		Rig:        cfg.Rig,
+		ShadowMode: cfg.Shadow,
 	}
 
 	effort := "full"
@@ -171,6 +179,9 @@ func runOneCycle(ctx context.Context, cfg PatrolConfig, state *PatrolState) (*Pa
 
 	if effort == "abbreviated" {
 		// Abbreviated patrol: drain + quick scan only
+		if cfg.Shadow {
+			logf("SHADOW: running abbreviated patrol (drain + scan only)")
+		}
 		if _, err := runPatrolScanJSON(cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "patrol: abbreviated: scan failed: %v\n", err)
 		}
@@ -196,8 +207,12 @@ func runOneCycle(ctx context.Context, cfg PatrolConfig, state *PatrolState) (*Pa
 		}
 		for _, esc := range escalations {
 			dogName := RouteDogForEscalation(esc)
-			if err := cfg.Escalator.Escalate(esc, dogName); err != nil {
-				fmt.Fprintf(os.Stderr, "patrol: warning: escalation failed: %v\n", err)
+			if cfg.Shadow {
+				logf("SHADOW: would escalate %s to %s dog: %s", esc.Type, dogName, esc.Details)
+			} else {
+				if err := cfg.Escalator.Escalate(esc, dogName); err != nil {
+					fmt.Fprintf(os.Stderr, "patrol: warning: escalation failed: %v\n", err)
+				}
 			}
 		}
 		result.Escalations = len(escalations)
@@ -318,6 +333,10 @@ func runPatrolScanJSON(cfg PatrolConfig) (*ScanResult, error) {
 
 // checkTimerGates runs bd gate check --type=timer --escalate.
 func checkTimerGates(cfg PatrolConfig) error {
+	if cfg.Shadow {
+		logf("SHADOW: would run 'bd gate check --type=timer --escalate'")
+		return nil
+	}
 	args := []string{"gate", "check", "--type=timer", "--escalate"}
 	_, err := util.ExecWithOutput(cfg.WorkDir, "bd", args...)
 	if err != nil {
@@ -352,10 +371,15 @@ func checkSwarmCompletion(cfg PatrolConfig) error {
 			continue
 		}
 		if completed >= total && total > 0 {
-			// Notify mayor
-			notifyMayorSwarmComplete(cfg, swarm.Title, completed, total)
-			// Close swarm wisp
-			closeSwarmWisp(cfg, swarm.ID)
+			if cfg.Shadow {
+				logf("SHADOW: would notify mayor of swarm complete: %s (%d/%d)", swarm.Title, completed, total)
+				logf("SHADOW: would close swarm wisp: %s", swarm.ID)
+			} else {
+				// Notify mayor
+				notifyMayorSwarmComplete(cfg, swarm.Title, completed, total)
+				// Close swarm wisp
+				closeSwarmWisp(cfg, swarm.ID)
+			}
 		}
 	}
 
@@ -550,8 +574,12 @@ func checkRefineryHealth(cfg PatrolConfig) error {
 		// Check if there are MRs in the queue
 		queueDepth := getRefineryQueueDepth(cfg)
 		if queueDepth > 0 {
-			if err := cfg.Escalator.EscalateRefineryStuck(queueDepth, 0); err != nil {
-				return fmt.Errorf("refinery stuck escalation: %w", err)
+			if cfg.Shadow {
+				logf("SHADOW: would escalate refinery stuck (queue=%d, minutes=0)", queueDepth)
+			} else {
+				if err := cfg.Escalator.EscalateRefineryStuck(queueDepth, 0); err != nil {
+					return fmt.Errorf("refinery stuck escalation: %w", err)
+				}
 			}
 		}
 		return nil
@@ -568,8 +596,12 @@ func checkRefineryHealth(cfg PatrolConfig) error {
 	}
 
 	if status.Stuck && status.QueueDepth > 0 {
-		if err := cfg.Escalator.EscalateRefineryStuck(status.QueueDepth, status.StuckMinutes); err != nil {
-			return fmt.Errorf("refinery stuck escalation: %w", err)
+		if cfg.Shadow {
+			logf("SHADOW: would escalate refinery stuck (queue=%d, minutes=%d)", status.QueueDepth, status.StuckMinutes)
+		} else {
+			if err := cfg.Escalator.EscalateRefineryStuck(status.QueueDepth, status.StuckMinutes); err != nil {
+				return fmt.Errorf("refinery stuck escalation: %w", err)
+			}
 		}
 	}
 

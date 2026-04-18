@@ -20,6 +20,7 @@ var (
 	patrolOnce              bool
 	patrolJSON              bool
 	patrolVerbose           bool
+	patrolShadow            bool
 )
 
 var witnessPatrolCmd = &cobra.Command{
@@ -43,7 +44,8 @@ When it hits a case it cannot resolve, it slings a wisp to a deacon dog.
 Examples:
   gt witness patrol gastown
   gt witness patrol gastown --backoff-base 30s --backoff-max 5m
-  gt witness patrol gastown --once --json  # Test one cycle`,
+  gt witness patrol gastown --once --json  # Test one cycle
+  gt witness patrol gastown --shadow  # Shadow mode: log actions without taking them (for validation)`,
 	Args: cobra.ExactArgs(1),
 	RunE: runWitnessPatrol,
 }
@@ -57,6 +59,7 @@ func init() {
 	witnessPatrolCmd.Flags().BoolVar(&patrolOnce, "once", false, "Run one cycle and exit (for testing)")
 	witnessPatrolCmd.Flags().BoolVar(&patrolJSON, "json", false, "JSON output (for --once mode)")
 	witnessPatrolCmd.Flags().BoolVarP(&patrolVerbose, "verbose", "v", false, "Verbose logging")
+	witnessPatrolCmd.Flags().BoolVar(&patrolShadow, "shadow", false, "Shadow mode: log all actions without taking them (for validation against molecule)")
 
 	witnessCmd.AddCommand(witnessPatrolCmd)
 }
@@ -82,6 +85,7 @@ func runWitnessPatrol(cmd *cobra.Command, args []string) error {
 		Once:                patrolOnce,
 		JSON:                patrolJSON,
 		Verbose:             patrolVerbose,
+		Shadow:              patrolShadow,
 	}
 
 	// Create escalator
