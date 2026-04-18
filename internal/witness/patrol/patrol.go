@@ -516,13 +516,23 @@ func awaitNextTrigger(state *PatrolState, effort string, cfg PatrolConfig) (bool
 		"--json",
 	}
 
-	_, err := util.ExecWithOutput(cfg.WorkDir, "gt", args...)
+	output, err := util.ExecWithOutput(cfg.WorkDir, "gt", args...)
 	if err != nil {
-		// Check if it's a timeout (expected) or real error
-		// await-event returns non-zero on timeout, which is expected
-		return true, nil
+		// Real error (exit 1) — not a timeout. Log and return false so
+		// idle cycles are NOT incremented on real errors (network, JSON
+		// parse, permission, etc.). Only expected timeouts advance idle.
+		fmt.Fprintf(os.Stderr, "patrol: await-event error (not a timeout): %v\n", err)
+		return false, nil
 	}
 
+	// Exit 0 means JSON output. Parse reason to distinguish timeout from event.
+	var result struct {
+		Reason string `json:"reason"`
+	}
+	if json.Unmarshal([]byte(output), &result) == nil && result.Reason == "timeout" {
+		return true, nil
+	}
+	// Event woke us, or unknown reason — treat as non-timeout (no idle advance).
 	return false, nil
 }
 
