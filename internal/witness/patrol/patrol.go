@@ -648,21 +648,24 @@ func checkRefineryHealth(cfg PatrolConfig) error {
 		return nil
 	}
 
-	// Parse refinery status for stuck detection
+	// Parse refinery status for stuck detection.
+	// Actual JSON fields from gt refinery status --json: running, rig_name, session, queue_length
 	var status struct {
-		Stuck       bool `json:"stuck"`
-		StuckMinutes int `json:"stuck_minutes"`
-		QueueDepth  int  `json:"queue_depth"`
+		Running     bool   `json:"running"`
+		QueueLength int    `json:"queue_length"`
+		RigName     string `json:"rig_name"`
+		Session     string `json:"session"`
 	}
 	if err := json.Unmarshal([]byte(output), &status); err != nil {
 		return nil // Non-fatal: status parsing failed
 	}
 
-	if status.Stuck && status.QueueDepth > 0 {
+	// Stuck = refinery is not running but has MRs queued
+	if !status.Running && status.QueueLength > 0 {
 		if cfg.Shadow {
-			logf("SHADOW: would escalate refinery stuck (queue=%d, minutes=%d)", status.QueueDepth, status.StuckMinutes)
+			logf("SHADOW: would escalate refinery stuck (queue=%d)", status.QueueLength)
 		} else {
-			if err := cfg.Escalator.EscalateRefineryStuck(status.QueueDepth, status.StuckMinutes); err != nil {
+			if err := cfg.Escalator.EscalateRefineryStuck(status.QueueLength, 0); err != nil {
 				return fmt.Errorf("refinery stuck escalation: %w", err)
 			}
 		}
@@ -673,17 +676,20 @@ func checkRefineryHealth(cfg PatrolConfig) error {
 
 // getRefineryQueueDepth returns the number of MRs in the refinery queue.
 func getRefineryQueueDepth(cfg PatrolConfig) int {
-	args := []string{"refinery", "queue", "--count"}
+	// gt refinery queue --count does not exist; use --json instead.
+	args := []string{"refinery", "queue", "--json"}
 	output, err := util.ExecWithOutput(cfg.WorkDir, "gt", args...)
 	if err != nil {
 		return 0
 	}
 
-	// Try to parse a number from the output
-	if match := regexp.MustCompile(`(\d+)`).FindStringSubmatch(output); len(match) >= 2 {
-		if count, err := strconv.Atoi(match[1]); err == nil {
-			return count
-		}
+	// Parse JSON array; null or empty array means 0 MRs.
+	if output == "null" || output == "" {
+		return 0
 	}
-	return 0
+	var mrList []interface{}
+	if err := json.Unmarshal([]byte(output), &mrList); err != nil {
+		return 0
+	}
+	return len(mrList)
 }
