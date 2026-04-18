@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -57,6 +58,7 @@ type PatrolConfig struct {
 	JSON                bool // JSON output for --once mode
 	Verbose             bool
 	Shadow              bool // Shadow mode: log actions without taking them
+	ShadowLogFile       string
 	Escalator           *Escalator
 }
 
@@ -85,6 +87,102 @@ type PatrolCycleResult struct {
 	ShadowMode    bool           `json:"shadow_mode"`
 }
 
+// ShadowReport logs what actions would be taken in shadow mode.
+type ShadowReport struct {
+	Timestamp  time.Time `json:"timestamp"`
+	CycleCount int       `json:"cycle_count"`
+	Rig        string    `json:"rig"`
+	Mode       string    `json:"mode"` // "shadow" or "live"
+
+	// What would be / was done
+	MailDrain    ShadowMailDrain    `json:"mail_drain"`
+	Zombies      []ShadowZombie     `json:"zombies"`
+	Stalls       []ShadowStall      `json:"stalls"`
+	Completions  []ShadowCompletion `json:"completions"`
+	Escalations  []ShadowEscalation `json:"escalations"`
+	TimerGates   []string           `json:"timer_gates_expired"`
+	SwarmEvents  []string           `json:"swarm_events"`
+	RefineryStatus string           `json:"refinery_status"`
+
+	// Comparison metrics (populated when running alongside molecule)
+	Discrepancies  []ShadowDiscrepancy `json:"discrepancies,omitempty"`
+	MatchRate      float64            `json:"match_rate,omitempty"`
+}
+
+// Shadow actions for each category
+type ShadowMailDrain struct {
+	WouldDrain int    `json:"would_drain"`
+	Messages   []string `json:"messages,omitempty"`
+}
+
+type ShadowZombie struct {
+	Polecat     string `json:"polecat"`
+	Action      string `json:"action"` // "restart", "nuke", "escalate"
+	Reason      string `json:"reason"`
+	Taken       bool   `json:"taken"` // whether molecule took this action
+	MoleculeTook bool  `json:"molecule_took,omitempty"` // molecule action (for comparison)
+}
+
+type ShadowStall struct {
+	Polecat  string `json:"polecat"`
+	StallType string `json:"stall_type"`
+	Action   string `json:"action"`
+}
+
+type ShadowCompletion struct {
+	Polecat string `json:"polecat"`
+	Action  string `json:"action"`
+}
+
+type ShadowEscalation struct {
+	Type     string `json:"type"`
+	Polecat  string `json:"polecat,omitempty"`
+	Target   string `json:"target"` // "deacon", "mayor", "overseer"
+	Details  string `json:"details"`
+}
+
+type ShadowDiscrepancy struct {
+	Type     string `json:"type"` // "zombie_missed", "escalation_mismatch", etc.
+	Polecat  string `json:"polecat,omitempty"`
+	Expected string `json:"expected"`
+	Actual   string `json:"actual"`
+	Details  string `json:"details"`
+}
+
+// writeShadowReport writes a shadow report to the log file.
+func writeShadowReport(cfg PatrolConfig, report *ShadowReport) error {
+	var output io.Writer
+
+	if cfg.ShadowLogFile != "" {
+		f, err := os.OpenFile(cfg.ShadowLogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return fmt.Errorf("opening shadow log: %w", err)
+		}
+		defer f.Close()
+		output = f
+	} else {
+		output = os.Stdout
+	}
+
+	enc := json.NewEncoder(output)
+	enc.SetIndent("", "  ")
+	return enc.Encode(report)
+}
+
+// getShadowReport returns a shadow report for a cycle.
+func getShadowReport(cfg PatrolConfig, cycleCount int) *ShadowReport {
+	mode := "live"
+	if cfg.Shadow {
+		mode = "shadow"
+	}
+	return &ShadowReport{
+		Timestamp:  time.Now(),
+		CycleCount: cycleCount,
+		Rig:        cfg.Rig,
+		Mode:       mode,
+	}
+}
+
 // StateFileName is the filename for the patrol state file.
 const StateFileName = "witness-patrol-state.json"
 
@@ -99,14 +197,26 @@ func RunPatrolLoop(ctx context.Context, cfg PatrolConfig) error {
 		}
 	}
 
+	cycleCount := 0
+
 	for {
 		select {
 		case <-ctx.Done():
+			if cfg.Shadow {
+				fmt.Fprintf(os.Stderr, "patrol: shadow mode: %d cycles completed\n", cycleCount)
+			}
 			return saveState(cfg.WorkDir, state)
 		default:
 		}
 
-		cycleResult, err := runOneCycle(ctx, cfg, state)
+		cycleCount++
+
+		var shadowReport *ShadowReport
+		if cfg.Shadow {
+			shadowReport = getShadowReport(cfg, cycleCount)
+		}
+
+		cycleResult, err := runOneCycle(ctx, cfg, state, cycleCount, shadowReport)
 		if cfg.Once {
 			if cfg.JSON {
 				enc := json.NewEncoder(os.Stdout)
@@ -157,7 +267,7 @@ func RunPatrolLoop(ctx context.Context, cfg PatrolConfig) error {
 }
 
 // runOneCycle executes a single patrol cycle.
-func runOneCycle(ctx context.Context, cfg PatrolConfig, state *PatrolState) (*PatrolCycleResult, error) {
+func runOneCycle(ctx context.Context, cfg PatrolConfig, state *PatrolState, cycleCount int, shadowReport *ShadowReport) (*PatrolCycleResult, error) {
 	cycleStarted := time.Now()
 	result := &PatrolCycleResult{
 		Timestamp:  cycleStarted,
@@ -172,16 +282,21 @@ func runOneCycle(ctx context.Context, cfg PatrolConfig, state *PatrolState) (*Pa
 	result.Effort = effort
 
 	// 1. Mail drain (deterministic)
+	// In shadow mode, still drain to get accurate count comparison
 	drainCount, err := runMailDrain(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "patrol: warning: mail drain failed: %v\n", err)
 	}
 	result.DrainCount = drainCount
 
-	// 2. Process HELP messages from inbox (non-drainable messages need routing)
+	// Process HELP messages from inbox + track shadow drain count
 	if err := processDrainedMessages(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "patrol: warning: HELP message processing failed: %v\n", err)
 	}
+	if shadowReport != nil {
+		shadowReport.MailDrain.WouldDrain = drainCount
+	}
+
 
 	if effort == "abbreviated" {
 		// Abbreviated patrol: drain + quick scan only
@@ -192,6 +307,14 @@ func runOneCycle(ctx context.Context, cfg PatrolConfig, state *PatrolState) (*Pa
 			fmt.Fprintf(os.Stderr, "patrol: abbreviated: scan failed: %v\n", err)
 		}
 		result.CycleDuration = time.Since(cycleStarted)
+
+		// Write shadow report for abbreviated cycle
+		if shadowReport != nil {
+			if err := writeShadowReport(cfg, shadowReport); err != nil {
+				fmt.Fprintf(os.Stderr, "patrol: warning: could not write shadow report: %v\n", err)
+			}
+		}
+
 		return result, nil
 	}
 
@@ -213,9 +336,18 @@ func runOneCycle(ctx context.Context, cfg PatrolConfig, state *PatrolState) (*Pa
 		}
 		for _, esc := range escalations {
 			dogName := RouteDogForEscalation(esc)
-			if cfg.Shadow {
+			if shadowReport != nil || cfg.Shadow {
+				if shadowReport != nil {
+					shadowReport.Escalations = append(shadowReport.Escalations, ShadowEscalation{
+						Type:    string(esc.Type),
+						Polecat: esc.Polecat,
+						Target:  dogName,
+						Details: esc.Details,
+					})
+				}
 				logf("SHADOW: would escalate %s to %s dog: %s", esc.Type, dogName, esc.Details)
 			} else {
+				// Live mode: actually escalate
 				if err := cfg.Escalator.Escalate(esc, dogName); err != nil {
 					fmt.Fprintf(os.Stderr, "patrol: warning: escalation failed: %v\n", err)
 				}
@@ -224,22 +356,73 @@ func runOneCycle(ctx context.Context, cfg PatrolConfig, state *PatrolState) (*Pa
 		result.Escalations = len(escalations)
 	}
 
-	// 4. Check timer gates
+	// 4. Process zombies - log in shadow mode, execute in live mode
+	for _, zombie := range scanResult.Zombies {
+		if shadowReport != nil {
+			shadowReport.Zombies = append(shadowReport.Zombies, ShadowZombie{
+				Polecat: zombie.Polecat,
+				Action:  zombie.Action,
+				Reason:  zombie.Classification,
+			})
+			if cfg.Verbose {
+				fmt.Fprintf(os.Stderr, "patrol: [SHADOW] would %s zombie: %s (%s)\n",
+					zombie.Action, zombie.Polecat, zombie.Classification)
+			}
+		}
+	}
+
+	// 5. Process stalls - log in shadow mode, execute in live mode
+	for _, stall := range scanResult.Stalls {
+		if shadowReport != nil {
+			shadowReport.Stalls = append(shadowReport.Stalls, ShadowStall{
+				Polecat:   stall.Polecat,
+				StallType: stall.StallType,
+				Action:    stall.Action,
+			})
+			if cfg.Verbose {
+				fmt.Fprintf(os.Stderr, "patrol: [SHADOW] would %s stall: %s (%s)\n",
+					stall.Action, stall.Polecat, stall.StallType)
+			}
+		}
+	}
+
+	// 6. Process completions - log in shadow mode, execute in live mode
+	for _, completion := range scanResult.Completions {
+		if shadowReport != nil {
+			shadowReport.Completions = append(shadowReport.Completions, ShadowCompletion{
+				Polecat: completion.Polecat,
+				Action:  completion.Action,
+			})
+			if cfg.Verbose {
+				fmt.Fprintf(os.Stderr, "patrol: [SHADOW] would %s completion: %s\n",
+					completion.Action, completion.Polecat)
+			}
+		}
+	}
+
+	// 7. Check timer gates
 	if err := checkTimerGates(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "patrol: timer gate check failed: %v\n", err)
 	}
 
-	// 5. Check swarm completion
+	// 8. Check swarm completion
 	if err := checkSwarmCompletion(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "patrol: swarm check failed: %v\n", err)
 	}
 
-	// 6. Check refinery health
+	// 9. Check refinery health
 	if err := checkRefineryHealth(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "patrol: refinery health check failed: %v\n", err)
 	}
 
 	result.CycleDuration = time.Since(cycleStarted)
+
+	// Write shadow report
+	if shadowReport != nil {
+		if err := writeShadowReport(cfg, shadowReport); err != nil {
+			fmt.Fprintf(os.Stderr, "patrol: warning: could not write shadow report: %v\n", err)
+		}
+	}
 
 	return result, nil
 }

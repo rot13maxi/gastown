@@ -21,6 +21,7 @@ var (
 	patrolJSON              bool
 	patrolVerbose           bool
 	patrolShadow            bool
+	patrolShadowLogFile     string
 )
 
 var witnessPatrolCmd = &cobra.Command{
@@ -45,7 +46,15 @@ Examples:
   gt witness patrol gastown
   gt witness patrol gastown --backoff-base 30s --backoff-max 5m
   gt witness patrol gastown --once --json  # Test one cycle
-  gt witness patrol gastown --shadow  # Shadow mode: log actions without taking them (for validation)`,
+	gt witness patrol gastown --shadow  # Shadow mode: log actions without taking them (for validation)
+
+Shadow Mode:
+  gt witness patrol gastown --shadow  # Run alongside molecule, compare outputs
+  gt witness patrol gastown --shadow --shadow-log /var/log/patrol-shadow.jsonl
+
+Shadow mode logs all actions without taking them, allowing validation against
+the existing molecule. Run for 48 hours and compare outputs.
+`,
 	Args: cobra.ExactArgs(1),
 	RunE: runWitnessPatrol,
 }
@@ -60,6 +69,7 @@ func init() {
 	witnessPatrolCmd.Flags().BoolVar(&patrolJSON, "json", false, "JSON output (for --once mode)")
 	witnessPatrolCmd.Flags().BoolVarP(&patrolVerbose, "verbose", "v", false, "Verbose logging")
 	witnessPatrolCmd.Flags().BoolVar(&patrolShadow, "shadow", false, "Shadow mode: log all actions without taking them (for validation against molecule)")
+	witnessPatrolCmd.Flags().StringVar(&patrolShadowLogFile, "shadow-log", "", "File to write shadow reports to (default: stdout)")
 
 	witnessCmd.AddCommand(witnessPatrolCmd)
 }
@@ -86,6 +96,15 @@ func runWitnessPatrol(cmd *cobra.Command, args []string) error {
 		JSON:                patrolJSON,
 		Verbose:             patrolVerbose,
 		Shadow:              patrolShadow,
+		ShadowLogFile:       patrolShadowLogFile,
+	}
+
+	if cfg.Shadow {
+		fmt.Fprintf(os.Stderr, "patrol: starting in SHADOW mode\n")
+		fmt.Fprintf(os.Stderr, "patrol: shadow mode logs all actions without taking them\n")
+		if cfg.ShadowLogFile != "" {
+			fmt.Fprintf(os.Stderr, "patrol: shadow log: %s\n", cfg.ShadowLogFile)
+		}
 	}
 
 	// Create escalator
