@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/channelevents"
@@ -177,6 +178,11 @@ func runOneCycle(ctx context.Context, cfg PatrolConfig, state *PatrolState) (*Pa
 	}
 	result.DrainCount = drainCount
 
+	// 2. Process HELP messages from inbox (non-drainable messages need routing)
+	if err := processDrainedMessages(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "patrol: warning: HELP message processing failed: %v\n", err)
+	}
+
 	if effort == "abbreviated" {
 		// Abbreviated patrol: drain + quick scan only
 		if cfg.Shadow {
@@ -189,7 +195,7 @@ func runOneCycle(ctx context.Context, cfg PatrolConfig, state *PatrolState) (*Pa
 		return result, nil
 	}
 
-	// 2. Run full patrol scan (calls existing Go CLI)
+	// 3. Run full patrol scan (calls existing Go CLI)
 	scanResult, err := runPatrolScanJSON(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("patrol scan failed: %w", err)
@@ -254,6 +260,53 @@ func runMailDrain(cfg PatrolConfig) (int, error) {
 		return 0, nil
 	}
 	return drainCount, nil
+}
+
+// processDrainedMessages processes HELP messages from the witness inbox.
+// HELP messages are preserved during drain and need routing to appropriate handlers.
+func processDrainedMessages(cfg PatrolConfig) error {
+	if cfg.Shadow {
+		logf("SHADOW: would process HELP messages from inbox")
+		return nil
+	}
+
+	// Create mailbox for witness identity
+	mailbox := mail.NewMailboxFromAddress(fmt.Sprintf("%s/witness", cfg.Rig), cfg.WorkDir)
+
+	// List unread messages
+	messages, err := mailbox.ListUnread()
+	if err != nil {
+		// Non-fatal: mailbox may be empty or inaccessible
+		return nil
+	}
+
+	// Process HELP messages
+	for _, msg := range messages {
+		if isHelpMessage(msg) {
+			if cfg.Escalator != nil {
+				if err := cfg.Escalator.EscalateHelpMessage(msg); err != nil {
+					fmt.Fprintf(os.Stderr, "patrol: warning: failed to escalate HELP message %s: %v\n", msg.ID, err)
+				} else {
+					// Mark as read after successful escalation
+					_ = mailbox.MarkRead(msg.ID)
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// isHelpMessage returns true if the message is a HELP request.
+// HELP messages have "HELP" in the subject or body.
+func isHelpMessage(msg *mail.Message) bool {
+	if strings.Contains(strings.ToUpper(msg.Subject), "HELP") {
+		return true
+	}
+	if strings.Contains(strings.ToUpper(msg.Body), "HELP") {
+		return true
+	}
+	return false
 }
 
 // parseDrainCount parses the number of messages drained from gt mail drain output.
