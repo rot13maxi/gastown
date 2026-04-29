@@ -639,6 +639,8 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// Pre-declare push variables for checkpoint goto (gt-aufru)
 		var refspec string
 		var pushErr error
+		var tsPushed bool
+		var tsSubdir string
 
 		// Resume: skip push if already completed in a previous run (gt-aufru).
 		// Validate checkpoint branch matches current branch (ge-sbo: stale checkpoint
@@ -663,6 +665,30 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// exist on the submodule's remote, the Refinery MR will be broken.
 		// Detect modified submodules and push each one first.
 		pushSubmoduleChanges(g, defaultBranch)
+
+		// bitcoin-ts fork: push from subdirectory if it has commits (gt-bitcoin-ts)
+		// The bitcoin rig worktrees are cloned from bitcoin/bitcoin but the port
+		// work lives in a bitcoin-ts/ subdirectory with its own git repo pushed
+		// to rot13maxi/bitcoin-ts. Skip the parent push and push from the subdir.
+		tsSubdir = filepath.Join(cwd, "bitcoin-ts")
+		if _, err := os.Stat(filepath.Join(tsSubdir, ".git")); err == nil {
+			hsGit := git.NewGitWithDir(tsSubdir, "")
+			if remoteURL, err := hsGit.RemoteURL("origin"); err == nil &&
+				(strings.Contains(remoteURL, "rot13maxi/bitcoin-ts") || strings.Contains(remoteURL, "bitcoin-ts")) {
+				fmt.Printf("%s bitcoin-ts fork detected (remote=%s) — pushing from subdirectory\n",
+					style.Bold.Render("→"), remoteURL)
+				if subPushErr := hsGit.Push("origin", "master", false); subPushErr != nil {
+					style.PrintWarning("bitcoin-ts subdirectory push failed: %v", subPushErr)
+					// Fall through to normal push — let it fail with normal error
+				} else {
+					fmt.Printf("%s bitcoin-ts pushed to fork\n", style.Bold.Render("✓"))
+					tsPushed = true
+				}
+			}
+		}
+		if tsPushed {
+			goto notifyWitness
+		}
 
 		// Use explicit refspec (branch:branch) to create the remote branch.
 		// Without refspec, git push follows the tracking config — polecat branches
